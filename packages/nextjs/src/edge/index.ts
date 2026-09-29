@@ -30,7 +30,12 @@ import { dropMiddlewareTunnelRequests } from '../common/utils/dropMiddlewareTunn
 import { maybeForkIsolationScopeForRootSpan } from '../common/utils/forkIsolationScopeForRootSpan';
 import { getNormalizedRequestFromAttributes } from '../common/utils/getNormalizedRequestFromAttributes';
 import { isBuild } from '../common/utils/isBuild';
-import { flushSafelyWithTimeout, isCloudflareWaitUntilAvailable, waitUntil } from '../common/utils/responseEnd';
+import {
+  flushSafelyWithTimeout,
+  isAsyncContextOwnedByCloudflare,
+  isCloudflareWaitUntilAvailable,
+  waitUntil,
+} from '../common/utils/responseEnd';
 import { setUrlProcessingMetadata } from '../common/utils/setUrlProcessingMetadata';
 import { distDirRewriteFramesIntegration } from './distDirRewriteFramesIntegration';
 import { enhanceMiddlewareRootSpan } from '../common/enhanceMiddlewareRootSpan';
@@ -105,6 +110,10 @@ export function init(options: VercelEdgeOptions = {}): void {
     { attributes: { [TRANSACTION_ATTR_SHOULD_DROP_TRANSACTION]: true } },
   ];
   opts.ignoreSpans = [...(opts.ignoreSpans || []), ...nextjsIgnoreSpans];
+
+  if (isAsyncContextOwnedByCloudflare()) {
+    return;
+  }
 
   // Use appropriate SDK metadata based on the runtime environment
   if (isRunningOnCloudflare) {
