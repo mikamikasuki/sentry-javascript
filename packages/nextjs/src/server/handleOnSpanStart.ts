@@ -6,12 +6,14 @@ import {
   HTTP_TARGET,
   URL_QUERY,
 } from '@sentry/conventions/attributes';
+import { MIDDLEWARE } from '@sentry/conventions/op';
 import type { Client, Options, Span } from '@sentry/core';
 import {
   getIsolationScope,
   getRootSpan,
   hasSpanStreamingEnabled,
   HTTP_SPAN_NAME_FALLBACK,
+  SEMANTIC_ATTRIBUTE_SENTRY_OP,
   SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN,
   spanToJSON,
 } from '@sentry/core';
@@ -163,7 +165,10 @@ export function handleOnSpanStart(span: Span, client: Client): void {
 
   if (spanAttributes?.[ATTR_NEXT_SPAN_TYPE] === 'Middleware.execute') {
     const middlewareName = spanAttributes[ATTR_NEXT_SPAN_NAME];
-    if (typeof middlewareName === 'string') {
+    if (rootSpanAttributes?.[ATTR_NEXT_SPAN_TYPE] === undefined) {
+      // A root span that Next.js did not start, e.g. the one of `withSentry` from `@sentry/cloudflare`, keeps its name.
+      span.setAttribute(SEMANTIC_ATTRIBUTE_SENTRY_OP, MIDDLEWARE);
+    } else if (typeof middlewareName === 'string') {
       rootSpan.updateName(middlewareName);
       rootSpan.setAttributes({
         [HTTP_ROUTE]: middlewareName,

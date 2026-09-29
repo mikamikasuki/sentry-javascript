@@ -34,6 +34,7 @@ import {
   flushSafelyWithTimeout,
   isAsyncContextOwnedByCloudflare,
   isCloudflareWaitUntilAvailable,
+  setCloudflareWorkerRelease,
   waitUntil,
 } from '../common/utils/responseEnd';
 import { setUrlProcessingMetadata } from '../common/utils/setUrlProcessingMetadata';
@@ -112,6 +113,7 @@ export function init(options: VercelEdgeOptions = {}): void {
   opts.ignoreSpans = [...(opts.ignoreSpans || []), ...nextjsIgnoreSpans];
 
   if (isAsyncContextOwnedByCloudflare()) {
+    setCloudflareWorkerRelease(opts.release);
     return;
   }
 
