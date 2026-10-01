@@ -1,7 +1,13 @@
 import { expect, test } from '@playwright/test';
-import { collectStreamedSpans, getSpanOp, waitForStreamedSpan } from '@sentry-internal/test-utils';
+import { collectStreamedSpans, getRuntime, getSpanOp, waitForStreamedSpan } from '@sentry-internal/test-utils';
+import { isVinext } from './isVinext';
 
 test('Propagates trace for outgoing fetch requests', async ({ baseURL, request }) => {
+  test.skip(
+    isVinext && getRuntime() === 'bun',
+    'vinext replaces `globalThis.fetch` with a wrapper of the `fetch` from before `Sentry.init`, so `@sentry/bun` creates no fetch spans',
+  );
+
   // Inbound span, outbound span and the http.client span in between all share one trace, and
   // `collectStreamedSpans` evaluates a single trace at a time, so requiring all three together
   // keeps them paired.
