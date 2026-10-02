@@ -50,6 +50,8 @@ export { langChainIntegration } from './integrations/langchain';
 export { langGraphIntegration } from './integrations/langgraph';
 export { createFlueInstrumentation } from './ai/flue';
 export { flueIntegration } from './integrations/flue';
+export { piDurableIntegration } from './integrations/pi-durable';
+export type { PiDurableOptions } from './ai/pi-durable';
 export type { FlueOptions } from './ai/flue';
 export { mastraIntegration } from './integrations/mastra';
 export { mcpServerIntegration } from './integrations/mcp-server';
