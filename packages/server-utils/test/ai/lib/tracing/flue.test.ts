@@ -404,7 +404,15 @@ describe('createFlueInstrumentation', () => {
       await instr.interceptor(AGENT_OP, AGENT_CTX, async () => {
         instr.observe({ type: 'turn_start', turnId: 'turn_1', operationId: 'op_1' }, {});
         instr.observe(requestContent, {});
-        instr.observe(turn({ response: { ...turn().response, output: { role: 'assistant' } } }), {});
+        instr.observe(
+          turn({
+            response: {
+              ...turn().response,
+              output: { role: 'assistant', content: [{ type: 'text', text: 'It is sunny.' }] },
+            },
+          }),
+          {},
+        );
         instr.observe(
           {
             type: 'tool_start',
@@ -427,8 +435,11 @@ describe('createFlueInstrumentation', () => {
 
       const chat = findSpan('chat claude-haiku-4.5');
       expect(chat?.data['gen_ai.system_instructions']).toBe('You are helpful.');
-      expect(chat?.data['gen_ai.input.messages']).toContain('"role":"user"');
-      expect(chat?.data['gen_ai.output.messages']).toContain('"role":"assistant"');
+      // Mapped from pi-ai's message shape to the conventions, which is what Sentry renders.
+      expect(chat?.data['gen_ai.input.messages']).toBe('[{"role":"user","parts":[{"type":"text","content":"hi"}]}]');
+      expect(chat?.data['gen_ai.output.messages']).toBe(
+        '[{"role":"assistant","parts":[{"type":"text","content":"It is sunny."}],"finish_reason":"stop"}]',
+      );
       expect(chat?.data['gen_ai.tool.definitions']).toContain('get_weather');
 
       const tool = findSpan('execute_tool get_weather');

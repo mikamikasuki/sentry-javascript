@@ -39,6 +39,7 @@ import {
   SERVER_PORT,
 } from '@sentry/conventions/attributes';
 import { getGenAiSpanOp } from '../core/utils';
+import { piAiAssistantMessageToGenAiMessage, piAiMessagesToGenAiMessages } from '../pi-ai/messages';
 import { FLUE_ORIGIN, MAX_TRACKED_FLUE_SPANS } from './constants';
 import type { FlueErrorInfo, FlueModelRequestInfo, FlueObservation, FlueUsage } from './types';
 
@@ -173,9 +174,11 @@ export function endTurnSpan(observation: FlueObservation, turnSpans: SpanTracker
     span.setAttribute(GEN_AI_RESPONSE_FINISH_REASONS, stringify([finishReason]));
   }
 
-  const output = observation.response?.output;
-  if (recordOutputs && output !== undefined) {
-    span.setAttribute(GEN_AI_OUTPUT_MESSAGES, stringify(output));
+  const output = recordOutputs
+    ? piAiAssistantMessageToGenAiMessage(observation.response?.output, finishReason)
+    : undefined;
+  if (output) {
+    span.setAttribute(GEN_AI_OUTPUT_MESSAGES, stringify([output]));
   }
 
   setUsageAttributes(span, observation.response?.usage, observation.isError);
@@ -283,8 +286,9 @@ export function recordRequestContent(observation: FlueObservation, turnSpans: Sp
   if (input.systemPrompt) {
     span.setAttribute(GEN_AI_SYSTEM_INSTRUCTIONS, input.systemPrompt);
   }
-  if (input.messages) {
-    span.setAttribute(GEN_AI_INPUT_MESSAGES, stringify(input.messages));
+  const messages = piAiMessagesToGenAiMessages(input.messages);
+  if (messages.length) {
+    span.setAttribute(GEN_AI_INPUT_MESSAGES, stringify(messages));
   }
   if (input.tools?.length) {
     span.setAttribute(GEN_AI_TOOL_DEFINITIONS, stringify(input.tools));
