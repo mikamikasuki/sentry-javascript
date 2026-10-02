@@ -1,0 +1,160 @@
+import { expect, test } from '@playwright/test';
+import { collectStreamedSpans, getSpanOp, waitForError } from '@sentry-internal/test-utils';
+import { createConversation, sendMessage } from './utils';
+
+const APP = 'node-pi-durable';
+
+test('traces a run as invoke_agent with chat, execute_tool and provider spans', async ({ baseURL }) => {
+  const conversationId = await createConversation(baseURL!);
+  // A run is its own trace, and its `invoke_agent` segment ends last.
+  const spansPromise = collectStreamedSpans(
+    APP,
+    spansOfTrace =>
+      spansOfTrace.some(
+        span =>
+          span.is_segment && String(span.attributes['gen_ai.conversation.id']?.value).endsWith(`:${conversationId}`),
+      ) && spansOfTrace.some(span => span.attributes['gen_ai.tool.name']?.value === 'get_weather'),
+  );
+
+  const settled = await sendMessage(
+    baseURL!,
+    conversationId,
+    'What is the weather in Vienna? Use the get_weather tool.',
+  );
+  expect(settled.status).toBe('done');
+
+  const spans = await spansPromise;
+  const agent = spans.find(span => span.is_segment)!;
+  const chats = spans.filter(span => getSpanOp(span) === 'gen_ai.chat');
+  const tool = spans.find(span => span.attributes['gen_ai.tool.name']?.value === 'get_weather')!;
+  const manualSpan = spans.find(span => span.name === 'resolve-weather');
+  const providerCalls = spans.filter(span => getSpanOp(span) === 'http.client');
+
+  expect(getSpanOp(agent)).toBe('gen_ai.invoke_agent');
+  expect(agent.attributes['sentry.origin']?.value).toBe('auto.ai.pi_durable');
+  // The request that submitted the input is a trace of its own: the scheduler runs the work later.
+  expect(spans.some(span => getSpanOp(span) === 'http.server')).toBe(false);
+
+  // One tool-calling response, then the answer. pi-ai sends both through `@anthropic-ai/sdk`, whose
+  // own instrumentation must stay out so each request is reported once.
+  expect(chats.length).toBeGreaterThanOrEqual(2);
+  for (const chat of chats) {
+    expect(chat.parent_span_id).toBe(agent.span_id);
+    expect(chat.attributes['sentry.origin']?.value).toBe('auto.ai.pi_durable');
+    expect(chat.attributes['gen_ai.provider.name']?.value).toBe('openrouter');
+    expect(chat.attributes['gen_ai.request.model']?.value).toBe('anthropic/claude-haiku-4.5');
+    expect(typeof chat.attributes['gen_ai.usage.input_tokens']?.value).toBe('number');
+    expect(typeof chat.attributes['gen_ai.usage.output_tokens']?.value).toBe('number');
+    expect(typeof chat.attributes['gen_ai.cost.total_tokens']?.value).toBe('number');
+  }
+
+  expect(tool.parent_span_id).toBe(agent.span_id);
+  expect(tool.status).toBe('ok');
+  expect(tool.attributes['gen_ai.tool.call.arguments']?.value).toContain('Vienna');
+  expect(manualSpan?.parent_span_id).toBe(tool.span_id);
+
+  // The provider's HTTP calls nest inside the `chat` span that sent them.
+  expect(providerCalls.length).toBeGreaterThan(0);
+  for (const providerCall of providerCalls) {
+    expect(chats.map(chat => chat.span_id)).toContain(providerCall.parent_span_id);
+  }
+});
+
+test('reports a throwing tool as an error on its execute_tool span', async ({ baseURL }) => {
+  const conversationId = await createConversation(baseURL!);
+  const errorPromise = waitForError(
+    APP,
+    event => event.exception?.values?.[0]?.value === 'Intentional pi-durable tool failure',
+  );
+  const spansPromise = collectStreamedSpans(
+    APP,
+    spansOfTrace =>
+      spansOfTrace.some(
+        span =>
+          span.is_segment && String(span.attributes['gen_ai.conversation.id']?.value).endsWith(`:${conversationId}`),
+      ) && spansOfTrace.some(span => span.attributes['gen_ai.tool.name']?.value === 'fail_now'),
+  );
+
+  await sendMessage(baseURL!, conversationId, 'Call the fail_now tool, then tell me what happened.');
+
+  const [error, spans] = await Promise.all([errorPromise, spansPromise]);
+  const tool = spans.find(span => span.attributes['gen_ai.tool.name']?.value === 'fail_now')!;
+
+  expect(tool.status).toBe('error');
+  expect(error.exception?.values?.[0]?.mechanism).toEqual({ type: 'auto.ai.pi_durable', handled: true });
+  expect(error.contexts?.trace?.trace_id).toBe(tool.trace_id);
+  expect(error.contexts?.trace?.span_id).toBe(tool.span_id);
+});
+
+test('nests a subagent run under the tool call that delegated to it', async ({ baseURL }) => {
+  const conversationId = await createConversation(baseURL!);
+  const spansPromise = collectStreamedSpans(
+    APP,
+    spansOfTrace =>
+      spansOfTrace.some(
+        span =>
+          span.is_segment && String(span.attributes['gen_ai.conversation.id']?.value).endsWith(`:${conversationId}`),
+      ) && spansOfTrace.some(span => !span.is_segment && getSpanOp(span) === 'gen_ai.invoke_agent'),
+  );
+
+  const settled = await sendMessage(
+    baseURL!,
+    conversationId,
+    'Use the delegate tool to ask a subagent: "What is 2 + 2? Reply with only the number." Then reply with its answer.',
+  );
+  expect(settled.status).toBe('done');
+
+  const spans = await spansPromise;
+  const agent = spans.find(span => span.is_segment)!;
+  const delegate = spans.find(span => span.attributes['gen_ai.tool.name']?.value === 'delegate')!;
+  const subagent = spans.find(span => !span.is_segment && getSpanOp(span) === 'gen_ai.invoke_agent')!;
+  const subagentChat = spans.find(
+    span => getSpanOp(span) === 'gen_ai.chat' && span.parent_span_id === subagent.span_id,
+  );
+
+  expect(delegate.parent_span_id).toBe(agent.span_id);
+  expect(subagent.parent_span_id).toBe(delegate.span_id);
+  expect(subagentChat).toBeDefined();
+
+  // The subagent has a conversation of its own, in the same Harness.
+  const [agentHarness, agentConversation] = String(agent.attributes['gen_ai.conversation.id']?.value).split(':');
+  const [subagentHarness, subagentConversation] = String(subagent.attributes['gen_ai.conversation.id']?.value).split(
+    ':',
+  );
+  expect(subagentHarness).toBe(agentHarness);
+  expect(subagentConversation).not.toBe(agentConversation);
+});
+
+test('resumes a run in a new trace after the server crashes during a tool call', async ({ baseURL }) => {
+  const conversationId = await createConversation(baseURL!);
+  // The tool span of the crashed process never ends, so a finished `flaky_step` span can only come
+  // from the rerun in the restarted server.
+  const spansPromise = collectStreamedSpans(
+    APP,
+    spansOfTrace =>
+      spansOfTrace.some(
+        span =>
+          span.is_segment && String(span.attributes['gen_ai.conversation.id']?.value).endsWith(`:${conversationId}`),
+      ) &&
+      spansOfTrace.some(span => span.attributes['gen_ai.tool.name']?.value === 'flaky_step' && span.status === 'ok'),
+  );
+
+  const settled = await sendMessage(
+    baseURL!,
+    conversationId,
+    'Run the flaky step for job "nightly" with the flaky_step tool, then reply with the word DONE.',
+  );
+  expect(settled.status).toBe('done');
+
+  const spans = await spansPromise;
+  const agent = spans.find(span => span.is_segment)!;
+  const tool = spans.find(span => span.attributes['gen_ai.tool.name']?.value === 'flaky_step')!;
+  const answer = spans.find(
+    span =>
+      getSpanOp(span) === 'gen_ai.chat' && span.attributes['gen_ai.response.finish_reasons']?.value === '["stop"]',
+  );
+
+  expect(getSpanOp(agent)).toBe('gen_ai.invoke_agent');
+  expect(tool.parent_span_id).toBe(agent.span_id);
+  expect(answer?.parent_span_id).toBe(agent.span_id);
+});
